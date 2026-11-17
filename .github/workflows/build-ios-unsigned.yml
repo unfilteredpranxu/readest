@@ -90,7 +90,35 @@ jobs:
           test -f "$apple/Readest.xcodeproj/project.pbxproj"
           test -f "$apple/Readest_iOS/Info.plist"
           test -f "$apple/Readest_iOS/Readest_iOS.entitlements"
-          plutil -lint "$apple/Readest_iOS/Info.plist"
+          # Readest's customized project.yml defines a WidgetKit target whose
+          # Info.plist is also ignored in git. The generic Tauri generator only
+          # creates the main application's plist, so materialize the widget
+          # extension plist matching the NSExtension properties in project.yml.
+          if [[ ! -f "$apple/ReadestWidget/Info.plist" ]]; then
+            mkdir -p "$apple/ReadestWidget"
+            cat > "$apple/ReadestWidget/Info.plist" <<'WIDGET_PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDevelopmentRegion</key><string>en</string>
+            <key>CFBundleDisplayName</key><string>Readest</string>
+            <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+            <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+            <key>CFBundleName</key><string>$(PRODUCT_NAME)</string>
+            <key>CFBundlePackageType</key><string>XPC!</string>
+            <key>CFBundleShortVersionString</key><string>1.0</string>
+            <key>CFBundleVersion</key><string>1</string>
+            <key>NSExtension</key>
+            <dict>
+              <key>NSExtensionPointIdentifier</key><string>com.apple.widgetkit-extension</string>
+            </dict>
+          </dict>
+          </plist>
+          WIDGET_PLIST
+          fi
+          plutil -lint "$apple/Readest_iOS/Info.plist" "$apple/ReadestWidget/Info.plist"
           git status --short
 
       - name: Validate iOS target and unsigned archive capability
