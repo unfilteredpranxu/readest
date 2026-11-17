@@ -1,5 +1,6 @@
 name: Build Readest iOS backup (macOS 26 Intel)
 
+# Rebuild after Swift 6 type-check simplification in PageFlipModel.swift.
 # The first commit runs a build. Subsequent builds can be started in Actions.
 on:
   workflow_dispatch:
@@ -68,6 +69,7 @@ jobs:
         with:
           workspaces: apps/readest-app/src-tauri
           key: readest-ios-unsigned-arm64
+          cache-on-failure: true
 
       - name: Recreate gitignored iOS scaffolding without replacing Readest customizations
         working-directory: apps/readest-app
