@@ -12,12 +12,12 @@ permissions:
 
 concurrency:
   group: readest-ios-unsigned-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   ios-unsigned:
     name: iPadOS arm64 / unsigned
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 120
     defaults:
       run:
