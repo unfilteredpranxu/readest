@@ -69,6 +69,30 @@ jobs:
           workspaces: apps/readest-app/src-tauri
           key: readest-ios-unsigned-arm64
 
+      - name: Recreate gitignored iOS scaffolding without replacing Readest customizations
+        working-directory: apps/readest-app
+        run: |
+          set -euo pipefail
+          # Upstream tracks a custom Xcode project but ignores Info.plist,
+          # Sources, launch screen, asset catalog and workspace scaffolding.
+          # Tauri ios build requires these generated files.
+          apple="src-tauri/gen/apple"
+          saved="$RUNNER_TEMP/readest-checked-in-apple"
+          mkdir -p "$saved"
+          rsync -a "$apple/" "$saved/"
+          rm -rf "$apple"
+          pnpm tauri ios init --ci --skip-targets-install
+          test -f "$apple/Readest_iOS/Info.plist"
+          test -d "$apple/Sources"
+          # Put the committed Xcode project, edited plugins and entitlements
+          # back over the generic generated template, keeping missing files.
+          rsync -a "$saved/" "$apple/"
+          test -f "$apple/Readest.xcodeproj/project.pbxproj"
+          test -f "$apple/Readest_iOS/Info.plist"
+          test -f "$apple/Readest_iOS/Readest_iOS.entitlements"
+          plutil -lint "$apple/Readest_iOS/Info.plist"
+          git status --short
+
       - name: Validate iOS target and unsigned archive capability
         working-directory: apps/readest-app
         run: |
