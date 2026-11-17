@@ -1,0 +1,206 @@
+name: Build Readest iOS backup (macOS 26 Intel)
+
+# The first commit runs a build. Subsequent builds can be started in Actions.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/build-ios-26-fallback.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: readest-ios-26-fallback-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios-unsigned:
+    name: iPadOS arm64 / unsigned
+    runs-on: macos-26-intel
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      CI: "true"
+      HUSKY: "0"
+      NEXT_PUBLIC_APP_PLATFORM: tauri
+    steps:
+      - name: Check out fork and required Git submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Show build environment
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          sw_vers
+          git rev-parse HEAD
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.1
+          run_install: false
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: Prepare PDF and other bundled vendor assets
+        run: pnpm --filter @readest/readest-app setup-vendors
+
+      - name: Install Rust toolchain and physical-device target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Cache Rust compilation
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/readest-app/src-tauri
+          key: readest-ios-unsigned-arm64
+
+      - name: Recreate gitignored iOS scaffolding without replacing Readest customizations
+        working-directory: apps/readest-app
+        run: |
+          set -euo pipefail
+          # Upstream tracks a custom Xcode project but ignores Info.plist,
+          # Sources, launch screen, asset catalog and workspace scaffolding.
+          # Tauri ios build requires these generated files.
+          apple="src-tauri/gen/apple"
+          saved="$RUNNER_TEMP/readest-checked-in-apple"
+          mkdir -p "$saved"
+          rsync -a "$apple/" "$saved/"
+          rm -rf "$apple"
+          pnpm tauri ios init --ci --skip-targets-install
+          test -f "$apple/Readest_iOS/Info.plist"
+          test -d "$apple/Sources"
+          # Put the committed Xcode project, edited plugins and entitlements
+          # back over the generic generated template, keeping missing files.
+          rsync -a "$saved/" "$apple/"
+          test -f "$apple/Readest.xcodeproj/project.pbxproj"
+          test -f "$apple/Readest_iOS/Info.plist"
+          test -f "$apple/Readest_iOS/Readest_iOS.entitlements"
+          # Readest's customized project.yml defines a WidgetKit target whose
+          # Info.plist is also ignored in git. The generic Tauri generator only
+          # creates the main application's plist, so materialize the widget
+          # extension plist matching the NSExtension properties in project.yml.
+          if [[ ! -f "$apple/ReadestWidget/Info.plist" ]]; then
+            mkdir -p "$apple/ReadestWidget"
+            cat > "$apple/ReadestWidget/Info.plist" <<'WIDGET_PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDevelopmentRegion</key><string>en</string>
+            <key>CFBundleDisplayName</key><string>Readest</string>
+            <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+            <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+            <key>CFBundleName</key><string>$(PRODUCT_NAME)</string>
+            <key>CFBundlePackageType</key><string>XPC!</string>
+            <key>CFBundleShortVersionString</key><string>1.0</string>
+            <key>CFBundleVersion</key><string>1</string>
+            <key>NSExtension</key>
+            <dict>
+              <key>NSExtensionPointIdentifier</key><string>com.apple.widgetkit-extension</string>
+            </dict>
+          </dict>
+          </plist>
+          WIDGET_PLIST
+          fi
+          plutil -lint "$apple/Readest_iOS/Info.plist" "$apple/ReadestWidget/Info.plist"
+          git status --short
+
+      - name: Validate iOS target and unsigned archive capability
+        working-directory: apps/readest-app
+        run: |
+          set -euo pipefail
+          pnpm tauri ios build --help | tee "$RUNNER_TEMP/tauri-ios-build-help.txt"
+          grep -q -- '--no-sign' "$RUNNER_TEMP/tauri-ios-build-help.txt"
+          grep -q -- '--archive-only' "$RUNNER_TEMP/tauri-ios-build-help.txt"
+          test -d src-tauri/gen/apple
+          rustup target list --installed | grep -Fx aarch64-apple-ios
+
+      - name: Build unsigned physical-device archive
+        working-directory: apps/readest-app
+        env:
+          # Never upload App Store credentials or signing certificates to this job.
+          CODE_SIGNING_ALLOWED: "NO"
+          CODE_SIGNING_REQUIRED: "NO"
+          CODE_SIGN_IDENTITY: ""
+        run: |
+          set -euo pipefail
+          pnpm tauri ios build --target aarch64 --no-sign --archive-only --ci
+
+      - name: Assemble unsigned IPA from physical-device app
+        run: |
+          set -euo pipefail
+          build_root="apps/readest-app/src-tauri/gen/apple/build"
+          out="$RUNNER_TEMP/readest-ios"
+          mkdir -p "$out/Payload"
+          archive_app="$(find "$build_root" -path '*/Products/Applications/Readest.app' -type d -print -quit)"
+          if [[ -n "$archive_app" ]]; then
+            app="$archive_app"
+          else
+            app="$(find "$build_root" -type d -name 'Readest.app' -print -quit)"
+          fi
+          if [[ -z "$app" || ! -d "$app" ]]; then
+            echo "::error::No built physical-device Readest.app was found."
+            exit 1
+          fi
+          ditto "$app" "$out/Payload/Readest.app"
+          plist="$out/Payload/Readest.app/Info.plist"
+          bundle_id="$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$plist")"
+          executable="$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$plist")"
+          echo "Bundle identifier: $bundle_id"
+          echo "Executable: $executable"
+          lipo -archs "$out/Payload/Readest.app/$executable" | grep -qw arm64
+          if codesign --verify --deep "$out/Payload/Readest.app" 2>/dev/null; then
+            echo "::warning::Unexpected existing signature; check signing state before installing."
+          fi
+          (
+            cd "$out"
+            /usr/bin/zip -q -r -y Readest-iOS-arm64-UNSIGNED.ipa Payload
+          )
+          unzip -t "$out/Readest-iOS-arm64-UNSIGNED.ipa" | tail -1
+          cat > "$out/INSTALLATION.txt" <<EOF
+          Readest source fork: ${GITHUB_REPOSITORY}
+          Commit: ${GITHUB_SHA}
+          Target: physical iPhone/iPad, arm64 (not a simulator app)
+          Bundle ID inside IPA: ${bundle_id}
+          This IPA is unsigned; it cannot be installed until correctly signed.
+          Sign the main app and every embedded extension/framework using
+          your own compatible certificate/provisioning and entitlements.
+          Some original Readest capabilities (iCloud, App Groups, CarPlay,
+          Associated Domains) are restricted to registered App IDs and will
+          not work merely by sideloading or changing the bundle identifier.
+          IMPORTANT: The original bundle ID may conflict with the App Store
+          Readest app. Back up books/annotations before any install; don't
+          replace an existing installation without understanding data loss.
+          No premium subscription or Readest-hosted cloud access is included.
+          EOF
+          echo "ARTIFACT_DIR=$out" >> "$GITHUB_ENV"
+          echo "### iOS unsigned artifact" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Built from: \`${GITHUB_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Bundle ID: \`$bundle_id\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Output: unsigned arm64 IPA (must be signed before installation)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload unsigned IPA and installation notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: readest-ios-arm64-unsigned
+          path: |
+            ${{ env.ARTIFACT_DIR }}/Readest-iOS-arm64-UNSIGNED.ipa
+            ${{ env.ARTIFACT_DIR }}/INSTALLATION.txt
+          if-no-files-found: error
+          retention-days: 14
