@@ -27,8 +27,10 @@ jobs:
       HUSKY: "0"
       NEXT_PUBLIC_APP_PLATFORM: tauri
     steps:
-      - name: Check out fork
+      - name: Check out fork and required Git submodules
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Show build environment
         run: |
